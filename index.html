@@ -1,0 +1,247 @@
+<script type="text/javascript">
+        var gk_isXlsx = false;
+        var gk_xlsxFileLookup = {};
+        var gk_fileData = {};
+        function filledCell(cell) {
+          return cell !== '' && cell != null;
+        }
+        function loadFileData(filename) {
+        if (gk_isXlsx && gk_xlsxFileLookup[filename]) {
+            try {
+                var workbook = XLSX.read(gk_fileData[filename], { type: 'base64' });
+                var firstSheetName = workbook.SheetNames[0];
+                var worksheet = workbook.Sheets[firstSheetName];
+
+                // Convert sheet to JSON to filter blank rows
+                var jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1, blankrows: false, defval: '' });
+                // Filter out blank rows (rows where all cells are empty, null, or undefined)
+                var filteredData = jsonData.filter(row => row.some(filledCell));
+
+                // Heuristic to find the header row by ignoring rows with fewer filled cells than the next row
+                var headerRowIndex = filteredData.findIndex((row, index) =>
+                  row.filter(filledCell).length >= filteredData[index + 1]?.filter(filledCell).length
+                );
+                // Fallback
+                if (headerRowIndex === -1 || headerRowIndex > 25) {
+                  headerRowIndex = 0;
+                }
+
+                // Convert filtered JSON back to CSV
+                var csv = XLSX.utils.aoa_to_sheet(filteredData.slice(headerRowIndex)); // Create a new sheet from filtered array of arrays
+                csv = XLSX.utils.sheet_to_csv(csv, { header: 1 });
+                return csv;
+            } catch (e) {
+                console.error(e);
+                return "";
+            }
+        }
+        return gk_fileData[filename] || "";
+        }
+        </script><!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>2024 USA Presidential Election Map</title>
+    <!-- jQuery for us-map library -->
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <!-- us-map library for rendering the map -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/us-map/1.0.1/jquery.usmap.min.js"></script>
+    <!-- us-map raphael dependency -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/raphael/2.3.0/raphael.min.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            text-align: center;
+            margin: 0;
+            padding: 20px;
+            background-color: #f0f0f0;
+        }
+        #electoral-bar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+        #electoral-bar .candidate {
+            display: flex;
+            align-items: center;
+        }
+        #electoral-bar img {
+            width: 50px;
+            height: 50px;
+            border-radius: 50%;
+            margin-right: 10px;
+        }
+        #electoral-bar .bar {
+            flex-grow: 1;
+            height: 20px;
+            display: flex;
+        }
+        #electoral-bar .bar div {
+            height: 100%;
+        }
+        #electoral-bar .dnc {
+            background-color: #0066cc;
+        }
+        #electoral-bar .gop {
+            background-color: #cc0000;
+        }
+        #electoral-bar .undecided {
+            background-color: #cccccc;
+        }
+        #map {
+            width: 100%;
+            max-width: 1000px;
+            margin: 0 auto;
+        }
+        .state-tooltip {
+            position: absolute;
+            background-color: white;
+            border: 1px solid black;
+            padding: 5px;
+            border-radius: 5px;
+            pointer-events: none;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <h1>2024 Presidential Election</h1>
+    <div id="electoral-bar">
+        <div class="candidate">
+            <img src="https://via.placeholder.com/50?text=KH" alt="Kamala Harris">
+            <div>
+                <strong>Kamala Harris</strong><br>
+                <span id="dnc-votes">0</span> votes (<span id="dnc-percentage">0%</span>)
+            </div>
+        </div>
+        <div class="bar">
+            <div class="dnc" id="dnc-bar" style="width: 0%"></div>
+            <div class="undecided" id="undecided-bar" style="width: 100%"></div>
+            <div class="gop" id="gop-bar" style="width: 0%"></div>
+        </div>
+        <div class="candidate">
+            <img src="https://via.placeholder.com/50?text=DT" alt="Donald Trump">
+            <div>
+                <strong>Donald Trump</strong><br>
+                <span id="gop-votes">0</span> votes (<span id="gop-percentage">0%</span>)
+            </div>
+        </div>
+    </div>
+    <div id="map"></div>
+    <div class="state-tooltip" id="tooltip"></div>
+
+    <script>
+        // Placeholder for Google Sheet JSON URL (replace with your actual URL)
+        const GOOGLE_SHEET_URL = 'https://sheets.googleapis.com/v4/spreadsheets/YOUR_SHEET_ID/values/Sheet1!A1:Q100?key=YOUR_API_KEY';
+
+        // Fetch data from Google Sheet
+        async function fetchElectionData() {
+            try {
+                const response = await fetch(GOOGLE_SHEET_URL);
+                const data = await response.json();
+                const rows = data.values;
+                const headers = rows[0];
+                const electionData = rows.slice(1).map(row => {
+                    const stateData = {};
+                    headers.forEach((header, index) => {
+                        stateData[header] = row[index] || '';
+                    });
+                    return stateData;
+                });
+                return electionData;
+            } catch (error) {
+                console.error('Error fetching data:', error);
+                return [];
+            }
+        }
+
+        // Process data and update the map
+        async function updateMap() {
+            const data = await fetchElectionData();
+            if (!data.length) return;
+
+            // Calculate national totals
+            let totalElectoralVotes = 0;
+            let dncElectoralVotes = 0;
+            let gopElectoralVotes = 0;
+            let totalVotes = 0;
+            let dncVotes = 0;
+            let gopVotes = 0;
+
+            const stateColors = {};
+            const stateTooltips = {};
+
+            data.forEach(state => {
+                const electoralVotes = parseInt(state['ELECTORAL VOTES']) || 0;
+                const winner = state['WINNER']?.toLowerCase();
+                const gopVotesState = parseFloat(state['GOP VOTES']) || 0;
+                const dncVotesState = parseFloat(state['DNC VOTES']) || 0;
+                const totalVotesState = parseFloat(state['TOTAL VOTES']) || 0;
+
+                totalElectoralVotes += electoralVotes;
+                totalVotes += totalVotesState;
+                dncVotes += dncVotesState;
+                gopVotes += gopVotesState;
+
+                if (winner.includes('democrat')) {
+                    stateColors[state['ABBREVIATIONS']] = '#0066cc'; // Blue for Democrat
+                    dncElectoralVotes += electoralVotes;
+                } else if (winner.includes('jay rockefeller')) {
+                    stateColors[state['ABBREVIATIONS']] = '#cc0000'; // Red for Republican
+                    gopElectoralVotes += electoralVotes;
+                } else {
+                    stateColors[state['ABBREVIATIONS']] = '#cccccc'; // Gray for undecided
+                }
+
+                // Tooltip content
+                stateTooltips[state['ABBREVIATIONS']] = `
+                    <strong>${state['STATES']}</strong><br>
+                    Electoral Votes: ${electoralVotes}<br>
+                    ${state['CANDIDATE A']}: ${gopVotesState.toLocaleString()} votes<br>
+                    ${state['CANDIDATE B']}: ${dncVotesState.toLocaleString()} votes<br>
+                    Winner: ${state['WINNER']}
+                `;
+            });
+
+            // Update electoral bar
+            const dncPercentage = (dncVotes / totalVotes * 100).toFixed(1);
+            const gopPercentage = (gopVotes / totalVotes * 100).toFixed(1);
+            document.getElementById('dnc-votes').textContent = dncElectoralVotes;
+            document.getElementById('gop-votes').textContent = gopElectoralVotes;
+            document.getElementById('dnc-percentage').textContent = dncPercentage + '%';
+            document.getElementById('gop-percentage').textContent = gopPercentage + '%';
+
+            const totalElectoral = dncElectoralVotes + gopElectoralVotes;
+            const dncBarWidth = totalElectoral ? (dncElectoralVotes / totalElectoralVotes * 100) : 0;
+            const gopBarWidth = totalElectoral ? (gopElectoralVotes / totalElectoralVotes * 100) : 0;
+            document.getElementById('dnc-bar').style.width = dncBarWidth + '%';
+            document.getElementById('gop-bar').style.width = gopBarWidth + '%';
+            document.getElementById('undecided-bar').style.width = (100 - dncBarWidth - gopBarWidth) + '%';
+
+            // Render the map
+            $('#map').usmap({
+                stateStyles: { fill: '#cccccc' },
+                stateSpecificStyles: stateColors,
+                mouseover: function(event, data) {
+                    const tooltip = document.getElementById('tooltip');
+                    tooltip.innerHTML = stateTooltips[data.name] || 'No data';
+                    tooltip.style.display = 'block';
+                    tooltip.style.left = (event.pageX + 10) + 'px';
+                    tooltip.style.top = (event.pageY + 10) + 'px';
+                },
+                mouseout: function() {
+                    document.getElementById('tooltip').style.display = 'none';
+                }
+            });
+        }
+
+        // Initial load
+        updateMap();
+
+        // Poll for updates every 30 seconds
+        setInterval(updateMap, 30000);
+    </script>
+</body>
+</html>
